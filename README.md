@@ -78,10 +78,22 @@ python rag_engines.py   # SQL + FAISS succeed; graph_context → [NEO4J_ERROR]
 docker start neo4j-auditor
 ```
 
+### 6. DSPy smoke test (uncompiled module)
+
+Requires `OPENROUTER_API_KEY` in `.env` (see `.env.example`).
+
+```bash
+python compiler.py --smoke "Moldy Mike's Wing Factory"
+```
+
+Runs `parallel_rag_strike` then an uncompiled `RestaurantRiskAnalyzer` ChainOfThought call. Expects parseable JSON: `safe_or_risk`, `risk_score`, `the_receipts`.
+
 ## Status
 
 - [x] Step 1 — Schema note (core entity, SQL / FAISS / Neo4j split)
 - [x] Step 2 — Data generation (`generate_sandbox.py`)
 - [x] Step 3 — Retrieval engines (`rag_engines.py`)
 - [x] Step 4 — Parallel retrieval (`parallel_rag_strike`)
-- [ ] Step 5 — DSPy synthesis (`compiler.py`)
+- [x] Step 5 — DSPy signature and module (`compiler.py`)
+- [ ] Step 6 — Judge metric
+- [ ] Step 7 — BootstrapFewShot compile
