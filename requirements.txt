@@ -1,0 +1,13 @@
+# ── Step 2: generate_sandbox.py ─────────────────────────────────────
+sentence-transformers>=2.7.0
+faiss-cpu>=1.8.0
+numpy>=1.26.0
+neo4j>=5.20.0
+python-dotenv>=1.0.0
+
+# ── Step 3: rag_engines.py ────────────────────────────────────────────
+rank-bm25>=0.2.2
+
+# ── Steps 3-4: rag_engines.py + compiler.py (future) ────────────────
+dspy-ai>=2.5.0
+openai>=1.35.0
