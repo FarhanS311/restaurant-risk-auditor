@@ -88,6 +88,23 @@ python compiler.py --smoke "Moldy Mike's Wing Factory"
 
 Runs `parallel_rag_strike` then an uncompiled `RestaurantRiskAnalyzer` ChainOfThought call. Expects parseable JSON: `safe_or_risk`, `risk_score`, `the_receipts`.
 
+### 7. Judge metric self-check (no API key)
+
+```bash
+python compiler.py --test-judge
+```
+
+### 8. Compile with BootstrapFewShot
+
+Requires `OPENROUTER_API_KEY`, Neo4j running, and sandbox data generated.
+
+```bash
+python compiler.py --optimize
+python compiler.py --analyze "Moldy Mike's Wing Factory"
+```
+
+Writes `optimized_auditor_state.json` (gitignored). `--analyze` prints the compiled student's chain-of-thought reasoning trace.
+
 ## Status
 
 - [x] Step 1 — Schema note (core entity, SQL / FAISS / Neo4j split)
@@ -95,5 +112,8 @@ Runs `parallel_rag_strike` then an uncompiled `RestaurantRiskAnalyzer` ChainOfTh
 - [x] Step 3 — Retrieval engines (`rag_engines.py`)
 - [x] Step 4 — Parallel retrieval (`parallel_rag_strike`)
 - [x] Step 5 — DSPy signature and module (`compiler.py`)
-- [ ] Step 6 — Judge metric
-- [ ] Step 7 — BootstrapFewShot compile
+- [x] Step 6 — Judge metric (`restaurant_risk_metric`)
+- [x] Step 7 — BootstrapFewShot compile (`--optimize` / `--analyze`)
+- [ ] Step 8 — Analyze and compare
+- [ ] Step 9 — Transparency UI
+- [ ] Step 10 — Full README

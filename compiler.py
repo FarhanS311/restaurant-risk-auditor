@@ -2,8 +2,7 @@
 """
 compiler.py — DSPy synthesizer for the Restaurant Health & Reputation Auditor.
 
-Step 5: RestaurantRiskSignature + ChainOfThought module + smoke test.
-Steps 6–7 (judge metric, BootstrapFewShot) added in later steps.
+Steps 5–7: Signature, ChainOfThought module, judge metric, BootstrapFewShot compile.
 
 Requires: OPENROUTER_API_KEY in .env
 """
@@ -15,10 +14,13 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import dspy
 from dotenv import load_dotenv
+from dspy.teleprompt import BootstrapFewShot
 
 from rag_engines import parallel_rag_strike
 
@@ -36,6 +38,24 @@ STUDENT_MODEL = os.getenv(
     "STUDENT_MODEL",
     "openrouter/google/gemini-2.0-flash-lite-001",
 )
+
+OPTIMIZED_STATE_PATH = Path("optimized_auditor_state.json")
+
+# ── Banned fluff phrases — instant disqualification ──────────────────
+AUDITOR_FLUFF: frozenset[str] = frozenset({
+    "synergy",
+    "stakeholder",
+    "paradigm shift",
+    "best-in-class",
+    "culinary journey",
+    "premium experience",
+    "brand alignment",
+    "value proposition",
+    "going forward",
+    "circle back",
+    "delightful dining experience",
+    "world-class ambiance",
+})
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -87,11 +107,7 @@ class RestaurantRiskSignature(dspy.Signature):
 # ════════════════════════════════════════════════════════════════════
 
 class RestaurantRiskAnalyzer(dspy.Module):
-    """
-    ChainOfThought wrapper around RestaurantRiskSignature.
-    Forces the LLM to reason through each data source before committing
-    to a SAFE/RISK verdict.
-    """
+    """ChainOfThought wrapper around RestaurantRiskSignature."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -111,7 +127,7 @@ class RestaurantRiskAnalyzer(dspy.Module):
 
 
 # ════════════════════════════════════════════════════════════════════
-#  JSON helpers (smoke test now; judge metric in Step 6)
+#  JSON helpers
 # ════════════════════════════════════════════════════════════════════
 
 def _extract_json(raw: str) -> Optional[Dict[str, Any]]:
@@ -126,8 +142,8 @@ def _extract_json(raw: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _validate_verdict_shape(data: Optional[Dict[str, Any]]) -> bool:
-    """Syntactic validation only — full judge metric comes in Step 6."""
+def _validate_verdict_shape(data: Optional[Dict[str, Any]], min_receipts: int = 1) -> bool:
+    """Syntactic validation of parsed verdict dict."""
     if data is None:
         return False
 
@@ -146,10 +162,85 @@ def _validate_verdict_shape(data: Optional[Dict[str, Any]]) -> bool:
         return False
 
     receipts = str(data.get("the_receipts", ""))
-    if not receipts.strip():
+    if len(receipts.strip()) < min_receipts:
         return False
 
     return True
+
+
+# ════════════════════════════════════════════════════════════════════
+#  STEP 6 — Deterministic Judge Metric
+# ════════════════════════════════════════════════════════════════════
+
+def restaurant_risk_metric(
+    example: dspy.Example,
+    prediction: dspy.Prediction,
+    trace: Optional[Any] = None,
+) -> bool:
+    """
+    Deterministic pass/fail judge. Returns True only when ALL conditions hold:
+      1. verdict field present and non-empty
+      2. No AUDITOR_FLUFF phrases in raw output
+      3. Valid JSON with required keys
+      4. safe_or_risk is SAFE or RISK
+      5. risk_score in [0.0, 10.0]
+      6. the_receipts > 30 chars
+      7. Gold safe_or_risk label matches when provided on example
+    """
+    raw_verdict: str = getattr(prediction, "verdict", "") or ""
+    if not raw_verdict.strip():
+        return False
+
+    lower_raw = raw_verdict.lower()
+    for fluff in AUDITOR_FLUFF:
+        if fluff.lower() in lower_raw:
+            return False
+
+    data = _extract_json(raw_verdict)
+    if not _validate_verdict_shape(data, min_receipts=31):
+        return False
+
+    gold_label: Optional[str] = getattr(example, "safe_or_risk", None)
+    if gold_label is not None and data["safe_or_risk"] != gold_label:
+        return False
+
+    return True
+
+
+def test_judge_metric() -> bool:
+    """Self-check: good prediction passes, deliberately bad prediction fails."""
+    good_prediction = dspy.Prediction(
+        verdict=(
+            '{"safe_or_risk":"RISK","risk_score":8.5,"the_receipts":'
+            '"Grade C inspection with 4 critical violations, food poisoning reviews, '
+            'and Apex shell-corp ownership link via supplier BudgetProvisions."}'
+        ),
+    )
+    good_example = dspy.Example(safe_or_risk="RISK")
+
+    bad_prediction = dspy.Prediction(
+        verdict=(
+            '{"safe_or_risk":"SAFE","risk_score":1.0,"the_receipts":'
+            '"A delightful dining experience with synergy across all stakeholders '
+            'and premium experience throughout."}'
+        ),
+    )
+    bad_example = dspy.Example(safe_or_risk="SAFE")
+
+    good_ok = restaurant_risk_metric(good_example, good_prediction)
+    bad_ok = restaurant_risk_metric(bad_example, bad_prediction)
+
+    if good_ok:
+        print("  GOOD prediction : JUDGE TEST PASSED")
+    else:
+        print("  GOOD prediction : JUDGE TEST FAILED (expected pass)")
+
+    if not bad_ok:
+        print("  BAD prediction  : JUDGE TEST PASSED (correctly rejected)")
+    else:
+        print("  BAD prediction  : JUDGE TEST FAILED (should have been rejected)")
+
+    return good_ok and not bad_ok
 
 
 def build_lm(model: str) -> dspy.LM:
@@ -167,14 +258,221 @@ def build_lm(model: str) -> dspy.LM:
 
 
 # ════════════════════════════════════════════════════════════════════
+#  STEP 7A — Training Set Builder
+# ════════════════════════════════════════════════════════════════════
+
+# (restaurant_name, expected_safe_or_risk)
+# 30 total: 15 SAFE, 15 RISK
+
+TRAINING_MANIFEST: List[Tuple[str, str]] = [
+    # ── SAFE (15) — clean A/B records, low scandal ───────────────────
+    ("Brasserie Moderne",         "SAFE"),
+    ("Clean Eats Co-op",          "SAFE"),
+    ("Baker's Hearth",            "SAFE"),
+    ("Luna Gelato Bar",           "SAFE"),
+    ("The Quiet Noodle",          "SAFE"),
+    ("Hearth & Harvest",          "SAFE"),
+    ("Artisan Coffee Roasters",   "SAFE"),
+    ("Noble Steakhouse",          "SAFE"),
+    ("Verde Salad Co.",           "SAFE"),
+    ("The Ramen Lab",             "SAFE"),
+    ("Pho Paradise",              "SAFE"),
+    ("Mediterranean Mezze",       "SAFE"),
+    ("Seoul Bowl House",          "SAFE"),
+    ("The Daily Grind Café",      "SAFE"),
+    ("El Patio Cantina",          "SAFE"),
+
+    # ── RISK (15) — grade C, scandal lore, or graph contagion ────────
+    ("Moldy Mike's Wing Factory", "RISK"),
+    ("Harbor Catch & Cook",       "RISK"),
+    ("The Greasy Spoon Depot",    "RISK"),
+    ("Quick Bite Express #14",    "RISK"),
+    ("Dragon Wok Alley",          "RISK"),
+    ("Back Alley BBQ Pit",        "RISK"),
+    ("Taco Libre Norte",          "RISK"),
+    ("Pizza Pit Stop",            "RISK"),
+    ("Luigi's Corner Bistro",     "RISK"),
+    ("Bangkok Street Kitchen",    "RISK"),
+    ("Burger Junction",           "RISK"),
+    ("Mama Rosa's Trattoria",     "RISK"),
+    ("Sakura Sushi Bar",          "RISK"),
+    ("Curry House Express",       "RISK"),
+    ("Farm Table Kitchen",        "RISK"),
+]
+
+
+def build_training_set(
+    manifest: List[Tuple[str, str]],
+    max_workers: int = 6,
+) -> List[dspy.Example]:
+    """Pre-fetch RAG contexts for every restaurant; wrap as dspy.Example objects."""
+    print(f"\n[TrainingSet] Fetching RAG contexts for {len(manifest)} restaurants...")
+
+    restaurant_names = [name for name, _ in manifest]
+    context_map: Dict[str, Dict[str, str]] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_name = {
+            pool.submit(parallel_rag_strike, name): name
+            for name in restaurant_names
+        }
+        for i, future in enumerate(as_completed(future_to_name), 1):
+            name = future_to_name[future]
+            try:
+                context_map[name] = future.result()
+                print(f"  [{i:02d}/{len(manifest)}] ✓  {name}")
+            except Exception as exc:
+                print(f"  [{i:02d}/{len(manifest)}] ✗  {name}  ({exc})")
+                context_map[name] = {
+                    "sql_context":   f"[BUILD_ERROR] {exc}",
+                    "faiss_context": f"[BUILD_ERROR] {exc}",
+                    "graph_context": f"[BUILD_ERROR] {exc}",
+                }
+
+    examples: List[dspy.Example] = []
+    for name, label in manifest:
+        ctx = context_map.get(name, {})
+        example = dspy.Example(
+            sql_context=ctx.get("sql_context",   "[MISSING]"),
+            faiss_context=ctx.get("faiss_context", "[MISSING]"),
+            graph_context=ctx.get("graph_context", "[MISSING]"),
+            safe_or_risk=label,
+        ).with_inputs("sql_context", "faiss_context", "graph_context")
+        examples.append(example)
+
+    print(f"[TrainingSet] Built {len(examples)} examples.\n")
+    return examples
+
+
+# ════════════════════════════════════════════════════════════════════
+#  STEP 7B — Optimization Loop
+# ════════════════════════════════════════════════════════════════════
+
+def run_optimization(
+    trainset: List[dspy.Example],
+    max_bootstrapped_demos: int = 6,
+    max_labeled_demos: int = 4,
+) -> RestaurantRiskAnalyzer:
+    """BootstrapFewShot with teacher LM traces compiled into student."""
+    teacher_lm = build_lm(TEACHER_MODEL)
+    student_lm = build_lm(STUDENT_MODEL)
+
+    print(f"[Optimizer] Teacher : {TEACHER_MODEL}")
+    print(f"[Optimizer] Student : {STUDENT_MODEL}")
+    print(f"[Optimizer] Bootstrapped demos : {max_bootstrapped_demos}")
+    print(f"[Optimizer] Labeled demos      : {max_labeled_demos}\n")
+
+    dspy.configure(lm=student_lm)
+
+    optimizer = BootstrapFewShot(
+        metric=restaurant_risk_metric,
+        max_bootstrapped_demos=max_bootstrapped_demos,
+        max_labeled_demos=max_labeled_demos,
+        teacher_settings={"lm": teacher_lm},
+        max_errors=10,
+    )
+
+    student_program = RestaurantRiskAnalyzer()
+
+    print("[Optimizer] Compiling... (this makes LLM calls — watch your token budget)")
+    compiled_program: RestaurantRiskAnalyzer = optimizer.compile(
+        student=student_program,
+        trainset=trainset,
+    )
+
+    return compiled_program
+
+
+def save_optimized_state(program: RestaurantRiskAnalyzer, path: Path) -> None:
+    program.save(str(path))
+    size_kb = path.stat().st_size / 1024
+    print(f"\n[Save] Optimized state → {path}  ({size_kb:.1f} KB)")
+
+
+def load_optimized_state(path: Path) -> RestaurantRiskAnalyzer:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No optimized state found at '{path}'. Run compiler.py --optimize first."
+        )
+    program = RestaurantRiskAnalyzer()
+    program.load(str(path))
+    print(f"[Load] Loaded optimized state from {path}")
+    return program
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Public API — single-restaurant analysis
+# ════════════════════════════════════════════════════════════════════
+
+def analyze_restaurant(
+    restaurant_name: str,
+    program: Optional[RestaurantRiskAnalyzer] = None,
+) -> Dict[str, Any]:
+    """Full pipeline: parallel RAG → DSPy synthesizer → parsed verdict."""
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY required to run analysis.")
+
+    student_lm = build_lm(STUDENT_MODEL)
+    dspy.configure(lm=student_lm)
+
+    if program is None:
+        if OPTIMIZED_STATE_PATH.exists():
+            program = load_optimized_state(OPTIMIZED_STATE_PATH)
+        else:
+            print("[Analyze] No compiled state found — running with raw student model.")
+            program = RestaurantRiskAnalyzer()
+
+    print(f"\n[Analyze] Firing RAG strike for '{restaurant_name}'...")
+    contexts = parallel_rag_strike(restaurant_name)
+
+    print("[Analyze] Running ChainOfThought synthesizer...")
+    prediction = program(
+        sql_context=contexts["sql_context"],
+        faiss_context=contexts["faiss_context"],
+        graph_context=contexts["graph_context"],
+    )
+
+    raw_verdict = prediction.verdict or ""
+    data = _extract_json(raw_verdict) or {}
+
+    dummy_example = dspy.Example(safe_or_risk=None)
+    passed_metric = restaurant_risk_metric(dummy_example, prediction)
+
+    return {
+        "restaurant":      restaurant_name,
+        "safe_or_risk":    data.get("safe_or_risk", "PARSE_ERROR"),
+        "risk_score":      data.get("risk_score", -1.0),
+        "the_receipts":    data.get("the_receipts", raw_verdict),
+        "metric_passed":   passed_metric,
+        "raw_reasoning":   getattr(prediction, "reasoning", ""),
+        "contexts":        contexts,
+    }
+
+
+def print_verdict(result: Dict[str, Any]) -> None:
+    verdict = result["safe_or_risk"]
+    metric_tag = "PASS" if result["metric_passed"] else "FAIL"
+
+    print(f"\n{'═' * 64}")
+    print(f"  VERDICT FOR: {result['restaurant']}")
+    print(f"{'═' * 64}")
+    print(f"  Safe/Risk     : {verdict}")
+    print(f"  Risk Score    : {result['risk_score']}")
+    print(f"  Metric        : {metric_tag}")
+    print(f"\n  THE RECEIPTS:")
+    print(f"  {result['the_receipts']}")
+    if result["raw_reasoning"]:
+        print(f"\n  CHAIN OF THOUGHT (truncated):")
+        preview = result["raw_reasoning"][:500].replace("\n", " ")
+        print(f"  {preview}...")
+
+
+# ════════════════════════════════════════════════════════════════════
 #  STEP 5 — Smoke test (uncompiled module)
 # ════════════════════════════════════════════════════════════════════
 
 def run_smoke_test(restaurant_name: str) -> bool:
-    """
-    Fires parallel RAG, runs uncompiled RestaurantRiskAnalyzer,
-    validates verdict JSON shape. Returns True on pass.
-    """
+    """Fires parallel RAG, runs uncompiled module, validates JSON shape."""
     if not OPENROUTER_API_KEY:
         print(
             "\n[ERROR] OPENROUTER_API_KEY is not set in .env\n"
@@ -185,7 +483,6 @@ def run_smoke_test(restaurant_name: str) -> bool:
         return False
 
     print(f"\n[Smoke] Student model : {STUDENT_MODEL}")
-    print(f"[Smoke] Teacher model : {TEACHER_MODEL} (configured for Step 7)")
     dspy.configure(lm=build_lm(STUDENT_MODEL))
 
     print(f"\n[Smoke] Firing parallel RAG for '{restaurant_name}'...")
@@ -228,28 +525,88 @@ def main() -> None:
         description="Restaurant Risk Analyzer — DSPy synthesizer"
     )
     parser.add_argument(
+        "--test-judge",
+        action="store_true",
+        help="Run judge metric self-check (good pass, bad fail) — no API key needed",
+    )
+    parser.add_argument(
         "--smoke",
         metavar="RESTAURANT_NAME",
         nargs="?",
         const="Moldy Mike's Wing Factory",
         default=None,
-        help=(
-            "Run uncompiled smoke test on a restaurant "
-            '(default: "Moldy Mike\'s Wing Factory")'
-        ),
+        help="Run uncompiled smoke test on a restaurant",
+    )
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+        help="Build training set and compile with BootstrapFewShot",
+    )
+    parser.add_argument(
+        "--analyze",
+        metavar="RESTAURANT_NAME",
+        help="Analyze one restaurant using compiled (or raw) student model",
+    )
+    parser.add_argument(
+        "--max-bootstrapped",
+        type=int,
+        default=6,
+        help="Max bootstrapped demos for BootstrapFewShot (default: 6)",
+    )
+    parser.add_argument(
+        "--max-labeled",
+        type=int,
+        default=4,
+        help="Max labeled demos for BootstrapFewShot (default: 4)",
     )
     args = parser.parse_args()
 
-    if args.smoke is None:
+    if not any([args.test_judge, args.smoke is not None, args.optimize, args.analyze]):
         parser.print_help()
         print(
-            "\nExample:\n"
+            "\nExamples:\n"
+            "  python compiler.py --test-judge\n"
             '  python compiler.py --smoke "Moldy Mike\'s Wing Factory"\n'
+            "  python compiler.py --optimize\n"
+            '  python compiler.py --analyze "Moldy Mike\'s Wing Factory"\n'
         )
         sys.exit(0)
 
-    ok = run_smoke_test(args.smoke)
-    sys.exit(0 if ok else 1)
+    if args.test_judge:
+        print(f"\n{'═' * 64}")
+        print("  JUDGE METRIC SELF-CHECK")
+        print("═" * 64)
+        ok = test_judge_metric()
+        if not ok:
+            sys.exit(1)
+
+    if args.smoke is not None:
+        ok = run_smoke_test(args.smoke)
+        if not ok:
+            sys.exit(1)
+
+    if args.optimize:
+        if not OPENROUTER_API_KEY:
+            print("\n[ERROR] OPENROUTER_API_KEY required for --optimize")
+            sys.exit(1)
+        print("\n[Mode] OPTIMIZATION RUN")
+        trainset = build_training_set(TRAINING_MANIFEST)
+        compiled = run_optimization(
+            trainset,
+            max_bootstrapped_demos=args.max_bootstrapped,
+            max_labeled_demos=args.max_labeled,
+        )
+        save_optimized_state(compiled, OPTIMIZED_STATE_PATH)
+        print("\n[Validation] Post-compile check on 'Moldy Mike's Wing Factory'...")
+        result = analyze_restaurant("Moldy Mike's Wing Factory", program=compiled)
+        print_verdict(result)
+
+    if args.analyze:
+        if not OPENROUTER_API_KEY:
+            print("\n[ERROR] OPENROUTER_API_KEY required for --analyze")
+            sys.exit(1)
+        result = analyze_restaurant(args.analyze)
+        print_verdict(result)
 
 
 if __name__ == "__main__":
