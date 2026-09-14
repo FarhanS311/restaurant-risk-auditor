@@ -60,9 +60,28 @@ print(query_graph("Moldy Mike's Wing Factory"))
 
 **Test entities:** `Moldy Mike's Wing Factory` (all three hit), `Farm Table Kitchen` (clean SQL, lore + graph risk), `Brasserie Moderne` (SQL only, FAISS/Neo4j miss), `NonExistent Restaurant` (all miss).
 
+### 5. Parallel retrieval
+
+```python
+from rag_engines import parallel_rag_strike
+ctx = parallel_rag_strike("Moldy Mike's Wing Factory")
+print(ctx["sql_context"], ctx["faiss_context"], ctx["graph_context"])
+```
+
+`python rag_engines.py` also prints a latency benchmark (parallel time should track the slowest engine, not the sum of all three).
+
+**Fault-isolation test** (confirm one engine failure does not crash the others):
+
+```bash
+docker stop neo4j-auditor
+python rag_engines.py   # SQL + FAISS succeed; graph_context → [NEO4J_ERROR]
+docker start neo4j-auditor
+```
+
 ## Status
 
 - [x] Step 1 — Schema note (core entity, SQL / FAISS / Neo4j split)
 - [x] Step 2 — Data generation (`generate_sandbox.py`)
 - [x] Step 3 — Retrieval engines (`rag_engines.py`)
-- [ ] Step 4 — DSPy synthesis (`compiler.py`)
+- [x] Step 4 — Parallel retrieval (`parallel_rag_strike`)
+- [ ] Step 5 — DSPy synthesis (`compiler.py`)

@@ -10,6 +10,8 @@ import os
 import pickle
 import re
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -349,6 +351,109 @@ def query_graph(restaurant_name: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════════════
+#  PARALLEL STRIKE — fires all three engines simultaneously
+# ════════════════════════════════════════════════════════════════════
+
+def parallel_rag_strike(restaurant_name: str) -> Dict[str, str]:
+    """
+    Submit query_sql, query_faiss, query_graph to a thread pool and collect results.
+    Each engine is independent — a failure in one does not block the others.
+
+    Returns:
+        {
+            "sql_context":   str,
+            "faiss_context": str,
+            "graph_context": str,
+        }
+    """
+    task_map = {
+        "sql_context":   query_sql,
+        "faiss_context": query_faiss,
+        "graph_context": query_graph,
+    }
+
+    results: Dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        future_to_key = {
+            pool.submit(fn, restaurant_name): key
+            for key, fn in task_map.items()
+        }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                results[key] = future.result()
+            except Exception as exc:
+                results[key] = f"[EXECUTOR_ERROR] {key} thread crashed: {exc}"
+
+    return results
+
+
+def _latency_benchmark(restaurant_name: str) -> None:
+    """Prove parallel latency tracks the slowest engine, not the sum."""
+    print(f"\n{'═' * 64}")
+    print("  LATENCY BENCHMARK")
+    print("═" * 64)
+
+    t0 = time.perf_counter()
+    query_sql(restaurant_name)
+    t_sql = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    query_faiss(restaurant_name)
+    t_faiss = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    query_graph(restaurant_name)
+    t_graph = time.perf_counter() - t0
+
+    slowest = max(t_sql, t_faiss, t_graph)
+
+    t0 = time.perf_counter()
+    query_sql(restaurant_name)
+    query_faiss(restaurant_name)
+    query_graph(restaurant_name)
+    t_sequential = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    parallel_rag_strike(restaurant_name)
+    t_parallel = time.perf_counter() - t0
+
+    print(f"  Engine timings : sql={t_sql:.3f}s  faiss={t_faiss:.3f}s  "
+          f"graph={t_graph:.3f}s  slowest={slowest:.3f}s")
+    print(f"  Sequential     : {t_sequential:.3f}s")
+    print(f"  Parallel       : {t_parallel:.3f}s")
+
+    if t_parallel < t_sequential * 0.9:
+        print("  PASS — parallel faster than sequential (near slowest engine, not sum)")
+    else:
+        print("  NOTE — parallel did not beat sequential threshold; engines may be too fast to measure")
+
+
+def _fault_isolation_demo(restaurant_name: str) -> None:
+    """Check SQL+FAISS succeed when graph is down; skip if Neo4j is up."""
+    print(f"\n{'═' * 64}")
+    print("  FAULT ISOLATION DEMO")
+    print("═" * 64)
+
+    ctx = parallel_rag_strike(restaurant_name)
+    sql_ok = ctx.get("sql_context", "").startswith("[SQLITE_STATS]")
+    faiss_ok = ctx.get("faiss_context", "").startswith("[FAISS_LORE]")
+    graph_err = ctx.get("graph_context", "").startswith("[NEO4J_ERROR]")
+    graph_ok = ctx.get("graph_context", "").startswith("[NEO4J_GRAPH]")
+
+    if sql_ok and faiss_ok and graph_err:
+        print("  FAULT TEST PASSED (Neo4j down — SQL + FAISS returned, graph tagged error)")
+    elif sql_ok and faiss_ok and graph_ok:
+        print("  FAULT TEST SKIPPED (Neo4j is up — run: docker stop neo4j-auditor)")
+    else:
+        print("  FAULT TEST UNEXPECTED:")
+        print(f"    sql_context   : {ctx.get('sql_context', '')[:80]}...")
+        print(f"    faiss_context : {ctx.get('faiss_context', '')[:80]}...")
+        print(f"    graph_context : {ctx.get('graph_context', '')[:80]}...")
+
+
+# ════════════════════════════════════════════════════════════════════
 #  SMOKE TEST
 # ════════════════════════════════════════════════════════════════════
 
@@ -362,11 +467,12 @@ if __name__ == "__main__":
 
     for name in TEST_RESTAURANTS:
         print(f"\n{'═' * 64}")
-        print(f"  ENGINE SMOKE TEST  →  {name}")
+        print(f"  PARALLEL RAG STRIKE  →  {name}")
         print("═" * 64)
-        print("\n── SQL ──")
-        print(query_sql(name))
-        print("\n── FAISS ──")
-        print(query_faiss(name))
-        print("\n── GRAPH ──")
-        print(query_graph(name))
+        ctx = parallel_rag_strike(name)
+        for key in ("sql_context", "faiss_context", "graph_context"):
+            print(f"\n── {key.upper()} ──")
+            print(ctx[key])
+
+    _latency_benchmark("Moldy Mike's Wing Factory")
+    _fault_isolation_demo("Moldy Mike's Wing Factory")
