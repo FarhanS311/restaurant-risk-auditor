@@ -42,8 +42,8 @@ Given a restaurant name it fires three parallel RAG retrievers simultaneously, c
                         │  restaurant_risk_metric (Judge) │
                         │  BootstrapFewShot optimizer     │
                         │  ──────────────────────────     │
-                        │  Teacher: gemini-2.0-flash      │
-                        │  Student: gemini-2.0-flash-lite │
+                        │  Teacher: gemini-2.5-flash      │
+                        │  Student: gemini-2.5-flash-lite │
                         └─────────────────┬──────────────┘
                                           │ verdict JSON
                         ┌─────────────────▼──────────────┐
@@ -68,8 +68,8 @@ Given a restaurant name it fires three parallel RAG retrievers simultaneously, c
 | Graph DB | Neo4j 5 (Docker locally, or hosted Aura in production) |
 | Hybrid retrieval | BM25 + dense embeddings + RRF fusion (`rank-bm25`) |
 | Embeddings | `all-MiniLM-L6-v2` (sentence-transformers, runs locally) |
-| Teacher LLM | `google/gemini-2.0-flash-001` via OpenRouter |
-| Student LLM | `google/gemini-2.0-flash-lite-001` via OpenRouter |
+| Teacher LLM | `google/gemini-2.5-flash` via OpenRouter |
+| Student LLM | `google/gemini-2.5-flash-lite` via OpenRouter |
 | UI | Flask + Vanilla JS + CSS neobrutalism |
 
 ---
@@ -135,8 +135,8 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=auditorpassword
 
 OPENROUTER_API_KEY=sk-or-v1-...
-TEACHER_MODEL=openrouter/google/gemini-2.0-flash-001
-STUDENT_MODEL=openrouter/google/gemini-2.0-flash-lite-001
+TEACHER_MODEL=openrouter/google/gemini-2.5-flash
+STUDENT_MODEL=openrouter/google/gemini-2.5-flash-lite
 ```
 
 ### 4. Generate sandbox data
@@ -245,7 +245,7 @@ python compiler.py --analyze "Moldy Mike's Wing Factory"
 
 **What `--optimize` does:**
 1. Builds a training set from 29 restaurants (`Farm Table Kitchen` is held out for compare).
-2. Configures teacher (`gemini-2.0-flash`) and student (`gemini-2.0-flash-lite`) LMs via OpenRouter.
+2. Configures teacher (`gemini-2.5-flash`) and student (`gemini-2.5-flash-lite`) LMs via OpenRouter.
 3. Runs `BootstrapFewShot` — teacher generates chain-of-thought traces; optimizer compiles the best demos into the student.
 4. Saves `optimized_auditor_state.json` (~gitignored artifact in project root).
 

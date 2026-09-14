@@ -32,11 +32,11 @@ OPENROUTER_BASE    = "https://openrouter.ai/api/v1"
 
 TEACHER_MODEL = os.getenv(
     "TEACHER_MODEL",
-    "openrouter/google/gemini-2.0-flash-001",
+    "openrouter/google/gemini-2.5-flash",
 )
 STUDENT_MODEL = os.getenv(
     "STUDENT_MODEL",
-    "openrouter/google/gemini-2.0-flash-lite-001",
+    "openrouter/google/gemini-2.5-flash-lite",
 )
 
 OPTIMIZED_STATE_PATH = Path("optimized_auditor_state.json")
