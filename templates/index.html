@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Restaurant Risk Auditor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --black:  #1B2A4A;
+  --white:  #FFFFFF;
+  --yellow: #D4DBF0;
+  --red:    #5C1525;
+  --green:  #0F3D2A;
+  --gray:   #E4E0D8;
+  --canvas: #F3F1EC;
+  --border: 2px solid var(--black);
+  --shadow: 4px 4px 0 var(--black);
+  --sans:   'Space Grotesk', sans-serif;
+  --mono:   'JetBrains Mono', monospace;
+}
+body { font-family: var(--sans); background: var(--canvas); color: var(--black); min-height: 100vh; }
+header {
+  padding: 28px 40px; border-bottom: var(--border);
+  display: flex; justify-content: space-between; align-items: flex-end;
+}
+.logo { font-size: 22px; font-weight: 900; letter-spacing: -1px; text-transform: uppercase; }
+.logo span { opacity: 0.35; }
+.header-meta { font-family: var(--mono); font-size: 11px; color: #888; letter-spacing: 0.5px; }
+.search-zone { padding: 48px 40px 40px; border-bottom: var(--border); max-width: 800px; }
+.search-label { font-family: var(--mono); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #999; margin-bottom: 14px; }
+.search-row { display: flex; }
+.search-input {
+  flex: 1; font-family: var(--mono); font-size: 18px; font-weight: 700;
+  padding: 14px 18px; border: var(--border); border-right: none;
+  background: var(--white); color: var(--black); outline: none;
+}
+.search-input:focus { background: var(--yellow); }
+.search-input::placeholder { color: #bbb; font-weight: 400; }
+.btn-analyze {
+  font-family: var(--sans); font-size: 14px; font-weight: 900; letter-spacing: 2px;
+  text-transform: uppercase; padding: 14px 28px; background: var(--black); color: var(--white);
+  border: var(--border); cursor: pointer; box-shadow: var(--shadow);
+  transition: transform 0.08s, box-shadow 0.08s; white-space: nowrap;
+}
+.btn-analyze:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--black); }
+.btn-analyze:active { transform: none; box-shadow: none; }
+.btn-analyze:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; transform: none; }
+.loading { display: none; padding: 40px; border-bottom: var(--border); align-items: center; gap: 16px; }
+.loading.active { display: flex; }
+.spinner {
+  width: 28px; height: 28px; border: 3px solid var(--black);
+  background: var(--yellow); animation: spin 0.6s linear infinite; flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text { font-family: var(--mono); font-size: 12px; letter-spacing: 2px; text-transform: uppercase; }
+.error-panel {
+  display: none; padding: 24px 40px; border-bottom: var(--border);
+  border-left: 6px solid var(--red); background: #EEE8F0;
+  font-family: var(--mono); font-size: 13px;
+}
+.error-panel.active { display: block; }
+#results { display: none; }
+#results.visible { display: block; }
+.verdict-banner {
+  padding: 36px 40px; border-bottom: var(--border);
+  display: flex; align-items: center; gap: 28px;
+}
+.verdict-banner.risk { background: var(--red); }
+.verdict-banner.safe { background: var(--green); }
+.verdict-badge {
+  font-size: 72px; font-weight: 900; line-height: 1; letter-spacing: -4px; color: var(--white);
+}
+.verdict-banner.safe .verdict-badge { color: var(--black); }
+.verdict-info { flex: 1; }
+.verdict-name {
+  font-size: 28px; font-weight: 900; color: var(--white);
+  letter-spacing: -1px; text-transform: uppercase;
+}
+.verdict-banner.safe .verdict-name { color: var(--black); }
+.verdict-meta {
+  font-family: var(--mono); font-size: 12px; color: rgba(255,255,255,0.6);
+  margin-top: 4px; letter-spacing: 1px; text-transform: uppercase;
+}
+.verdict-banner.safe .verdict-meta { color: rgba(0,0,0,0.45); }
+.metric-tag {
+  font-family: var(--mono); font-size: 11px; font-weight: 700;
+  padding: 5px 10px; border: 2px solid rgba(255,255,255,0.5);
+  color: var(--white); letter-spacing: 1px; align-self: flex-start;
+}
+.verdict-banner.safe .metric-tag { border-color: rgba(0,0,0,0.3); color: var(--black); }
+.risk-row {
+  padding: 24px 40px; border-bottom: var(--border);
+  display: flex; align-items: center; gap: 20px;
+}
+.risk-label {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 2px;
+  text-transform: uppercase; color: #999; white-space: nowrap;
+}
+.risk-track { flex: 1; height: 24px; border: var(--border); background: var(--gray); overflow: hidden; }
+.risk-fill { height: 100%; background: var(--black); transition: width 0.5s cubic-bezier(0.22, 1, 0.36, 1); }
+.risk-val { font-family: var(--mono); font-size: 14px; font-weight: 700; width: 40px; text-align: right; flex-shrink: 0; }
+.context-grid { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: var(--border); }
+.ctx { padding: 28px; border-right: var(--border); }
+.ctx:last-child { border-right: none; }
+.ctx-label {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 2px; text-transform: uppercase; color: #999; margin-bottom: 6px;
+}
+.ctx-title {
+  font-size: 15px; font-weight: 900; text-transform: uppercase;
+  letter-spacing: -0.5px; margin-bottom: 16px; padding-bottom: 12px;
+  border-bottom: 2px solid var(--black);
+}
+.ctx-body {
+  font-family: var(--mono); font-size: 11px; line-height: 1.75;
+  color: #2A3050; max-height: 280px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+.ctx-body::-webkit-scrollbar { width: 3px; }
+.ctx-body::-webkit-scrollbar-thumb { background: #ccc; }
+.receipts { border-bottom: var(--border); }
+.receipts-bar {
+  padding: 12px 40px; border-bottom: 2px solid var(--black); background: var(--black);
+  font-family: var(--mono); font-size: 10px; letter-spacing: 2px;
+  color: #8A9BBF; text-transform: uppercase;
+}
+.receipts-text {
+  font-family: var(--mono); font-size: 13px; line-height: 1.9;
+  padding: 28px 40px; background: #080D1A; color: #99B8E8; white-space: pre-wrap;
+}
+.cot { border-bottom: var(--border); }
+.cot-toggle {
+  width: 100%; text-align: left; padding: 16px 40px; background: var(--gray);
+  border: none; cursor: pointer; font-family: var(--mono); font-size: 11px;
+  font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+  display: flex; justify-content: space-between; color: var(--black);
+}
+.cot-toggle:hover { background: #D8D3CA; }
+.cot-arrow { transition: transform 0.2s; }
+.cot.open .cot-arrow { transform: rotate(90deg); }
+.cot-body {
+  display: none; font-family: var(--mono); font-size: 12px; line-height: 1.8;
+  padding: 28px 40px; color: #364060; white-space: pre-wrap; border-top: var(--border);
+}
+.cot.open .cot-body { display: block; }
+footer {
+  padding: 20px 40px; font-family: var(--mono); font-size: 11px; color: #aaa;
+  display: flex; justify-content: space-between;
+}
+@media (max-width: 700px) {
+  .context-grid { grid-template-columns: 1fr; }
+  .ctx { border-right: none; border-bottom: var(--border); }
+  .ctx:last-child { border-bottom: none; }
+  header, .search-zone, .verdict-banner, .risk-row, .ctx,
+  .receipts-text, .cot-toggle, .cot-body, footer { padding-left: 20px; padding-right: 20px; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Restaurant Auditor <span>///</span> Health &amp; Reputation</div>
+  <div class="header-meta" id="header-meta">30 restaurants · SQLite + FAISS + Neo4j</div>
+</header>
+
+<div class="search-zone">
+  <div class="search-label">Restaurant name</div>
+  <div class="search-row">
+    <input id="search-input" class="search-input" type="text"
+           placeholder="e.g. Farm Table Kitchen" list="restaurant-list" autocomplete="off" />
+    <datalist id="restaurant-list"></datalist>
+    <button class="btn-analyze" id="btn-analyze" onclick="runAnalysis()">Analyze ▶</button>
+  </div>
+</div>
+
+<div class="loading" id="loading">
+  <div class="spinner"></div>
+  <div class="loading-text" id="loading-text">Querying data streams...</div>
+</div>
+
+<div class="error-panel" id="error-panel"></div>
+
+<section id="results">
+  <div class="verdict-banner" id="verdict-banner">
+    <div class="verdict-badge" id="verdict-badge">—</div>
+    <div class="verdict-info">
+      <div class="verdict-name" id="verdict-name"></div>
+      <div class="verdict-meta" id="verdict-meta"></div>
+    </div>
+    <div class="metric-tag" id="metric-tag"></div>
+  </div>
+
+  <div class="risk-row">
+    <div class="risk-label">Risk Score</div>
+    <div class="risk-track">
+      <div class="risk-fill" id="risk-fill" style="width:0%"></div>
+    </div>
+    <div class="risk-val" id="risk-val">0.0</div>
+  </div>
+
+  <div class="context-grid">
+    <div class="ctx">
+      <div class="ctx-label">SQLite</div>
+      <div class="ctx-title">The Math</div>
+      <div class="ctx-body" id="ctx-sql"></div>
+    </div>
+    <div class="ctx">
+      <div class="ctx-label">FAISS</div>
+      <div class="ctx-title">The Lore</div>
+      <div class="ctx-body" id="ctx-faiss"></div>
+    </div>
+    <div class="ctx">
+      <div class="ctx-label">Neo4j</div>
+      <div class="ctx-title">The Web</div>
+      <div class="ctx-body" id="ctx-neo4j"></div>
+    </div>
+  </div>
+
+  <div class="receipts">
+    <div class="receipts-bar">The Receipts — synthesized verdict evidence</div>
+    <div class="receipts-text" id="receipts-text"></div>
+  </div>
+
+  <div class="cot" id="cot">
+    <button class="cot-toggle" onclick="document.getElementById('cot').classList.toggle('open')">
+      <span>Chain of Thought</span>
+      <span class="cot-arrow">▶</span>
+    </button>
+    <div class="cot-body" id="cot-body"></div>
+  </div>
+</section>
+
+<footer>
+  <span>DSPy + Parallel RAG + Neo4j</span>
+  <span>Teacher: gemini-2.0-flash · Student: gemini-2.0-flash-lite</span>
+</footer>
+
+<script>
+let restaurants = [];
+
+const CYCLE = [
+  'Querying SQLite inspections...',
+  'Pulling FAISS review lore...',
+  'Traversing Neo4j ownership graph...',
+  'Running DSPy chain-of-thought...',
+  'Synthesizing verdict...',
+];
+
+window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const res = await fetch('/api/restaurants');
+    restaurants = await res.json();
+    const dl = document.getElementById('restaurant-list');
+    dl.innerHTML = restaurants.map(r => `<option value="${r.name}">`).join('');
+    if (restaurants.length) {
+      document.getElementById('header-meta').textContent =
+        `${restaurants.length} restaurants · SQLite + FAISS + Neo4j`;
+    }
+  } catch (_) {}
+  document.getElementById('search-input')
+    .addEventListener('keydown', e => { if (e.key === 'Enter') runAnalysis(); });
+});
+
+async function runAnalysis() {
+  const name = document.getElementById('search-input').value.trim();
+  if (!name) {
+    document.getElementById('search-input').style.background = '#EEE8F0';
+    setTimeout(() => document.getElementById('search-input').style.background = '', 400);
+    return;
+  }
+
+  let ci = 0;
+  const lt = document.getElementById('loading-text');
+  lt.textContent = CYCLE[0];
+  const timer = setInterval(() => { ci = (ci + 1) % CYCLE.length; lt.textContent = CYCLE[ci]; }, 1600);
+  document.getElementById('loading').classList.add('active');
+  document.getElementById('results').classList.remove('visible');
+  document.getElementById('error-panel').classList.remove('active');
+  document.getElementById('btn-analyze').disabled = true;
+
+  try {
+    const res = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ restaurant_name: name }),
+    });
+    const data = await res.json();
+    clearInterval(timer);
+    document.getElementById('loading').classList.remove('active');
+    document.getElementById('btn-analyze').disabled = false;
+    if (!res.ok) { showError(data.error || 'Pipeline failed'); return; }
+    render(data);
+  } catch (e) {
+    clearInterval(timer);
+    document.getElementById('loading').classList.remove('active');
+    document.getElementById('btn-analyze').disabled = false;
+    showError(e.message);
+  }
+}
+
+function render(d) {
+  const verdict = (d.safe_or_risk || 'ERROR').toUpperCase();
+  const risk = parseFloat(d.risk_score) || 0;
+  const isSafe = verdict === 'SAFE';
+  const r = restaurants.find(x => x.name.toLowerCase() === (d.restaurant || '').toLowerCase()) || {};
+
+  const banner = document.getElementById('verdict-banner');
+  banner.className = 'verdict-banner ' + (isSafe ? 'safe' : 'risk');
+  document.getElementById('verdict-badge').textContent = verdict;
+  document.getElementById('verdict-name').textContent = d.restaurant || '';
+  const meta = [r.cuisine_type, r.borough, r.latest_grade ? `grade ${r.latest_grade}` : '']
+    .filter(Boolean).join(' · ');
+  document.getElementById('verdict-meta').textContent = meta;
+  document.getElementById('metric-tag').textContent = d.metric_passed ? '✓ metric pass' : '✗ metric fail';
+
+  setTimeout(() => {
+    document.getElementById('risk-fill').style.width = Math.min(risk / 10 * 100, 100) + '%';
+    document.getElementById('risk-val').textContent = risk.toFixed(1);
+  }, 60);
+
+  document.getElementById('ctx-sql').textContent = d.contexts?.sql_context || '(no SQL context)';
+  document.getElementById('ctx-faiss').textContent = d.contexts?.faiss_context || '(no FAISS context)';
+  document.getElementById('ctx-neo4j').textContent = d.contexts?.graph_context || '(no graph context)';
+
+  document.getElementById('receipts-text').textContent = d.the_receipts || '';
+  document.getElementById('cot-body').textContent = d.raw_reasoning || '(no trace)';
+  document.getElementById('cot').classList.remove('open');
+
+  document.getElementById('results').classList.add('visible');
+  document.querySelector('.verdict-banner').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-panel');
+  el.textContent = msg;
+  el.classList.add('active');
+}
+</script>
+</body>
+</html>

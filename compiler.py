@@ -2,7 +2,7 @@
 """
 compiler.py — DSPy synthesizer for the Restaurant Health & Reputation Auditor.
 
-Steps 5–7: Signature, ChainOfThought module, judge metric, BootstrapFewShot compile.
+Steps 5–9: Signature, judge metric, BootstrapFewShot compile, compare analysis.
 
 Requires: OPENROUTER_API_KEY in .env
 """
@@ -261,11 +261,16 @@ def build_lm(model: str) -> dspy.LM:
 #  STEP 7A — Training Set Builder
 # ════════════════════════════════════════════════════════════════════
 
+# Held-out entity for Step 8 compare (NOT in TRAINING_MANIFEST).
+# Farm Table Kitchen: grade-A SQL, scandal lore in FAISS, shell-corp graph risk.
+HOLDOUT_RESTAURANT = "Farm Table Kitchen"
+HOLDOUT_GOLD_LABEL = "RISK"
+
 # (restaurant_name, expected_safe_or_risk)
-# 30 total: 15 SAFE, 15 RISK
+# 29 total: 14 SAFE, 15 RISK — Farm Table Kitchen held out for --compare
 
 TRAINING_MANIFEST: List[Tuple[str, str]] = [
-    # ── SAFE (15) — clean A/B records, low scandal ───────────────────
+    # ── SAFE (14) — clean A/B records, low scandal ───────────────────
     ("Brasserie Moderne",         "SAFE"),
     ("Clean Eats Co-op",          "SAFE"),
     ("Baker's Hearth",            "SAFE"),
@@ -297,8 +302,9 @@ TRAINING_MANIFEST: List[Tuple[str, str]] = [
     ("Mama Rosa's Trattoria",     "RISK"),
     ("Sakura Sushi Bar",          "RISK"),
     ("Curry House Express",       "RISK"),
-    ("Farm Table Kitchen",        "RISK"),
 ]
+
+TRAINING_NAMES: frozenset[str] = frozenset(name for name, _ in TRAINING_MANIFEST)
 
 
 def build_training_set(
@@ -401,6 +407,229 @@ def load_optimized_state(path: Path) -> RestaurantRiskAnalyzer:
 
 
 # ════════════════════════════════════════════════════════════════════
+#  Inference helpers (shared by analyze + compare)
+# ════════════════════════════════════════════════════════════════════
+
+def _run_program_on_contexts(
+    program: RestaurantRiskAnalyzer,
+    contexts: Dict[str, str],
+) -> dspy.Prediction:
+    return program(
+        sql_context=contexts["sql_context"],
+        faiss_context=contexts["faiss_context"],
+        graph_context=contexts["graph_context"],
+    )
+
+
+def _prediction_to_result(
+    restaurant_name: str,
+    contexts: Dict[str, str],
+    prediction: dspy.Prediction,
+    gold_label: Optional[str] = None,
+) -> Dict[str, Any]:
+    raw_verdict = prediction.verdict or ""
+    data = _extract_json(raw_verdict) or {}
+
+    example = dspy.Example(safe_or_risk=gold_label)
+    passed_metric = restaurant_risk_metric(example, prediction)
+    quality = score_verdict_quality(prediction)
+
+    return {
+        "restaurant":    restaurant_name,
+        "safe_or_risk":  data.get("safe_or_risk", "PARSE_ERROR"),
+        "risk_score":    data.get("risk_score", -1.0),
+        "the_receipts":  data.get("the_receipts", raw_verdict),
+        "metric_passed": passed_metric,
+        "raw_reasoning": getattr(prediction, "reasoning", "") or "",
+        "raw_verdict":   raw_verdict,
+        "contexts":      contexts,
+        "quality":       quality,
+    }
+
+
+_SQL_CITATION_WORDS = ("inspection", "grade", "score", "violation", "sqlite")
+_FAISS_CITATION_WORDS = ("review", "lore", "news", "whistleblower", "faiss", "customer")
+_GRAPH_CITATION_WORDS = ("owner", "chain", "supplier", "graph", "neo4j", "shell", "corp")
+
+
+def _cites_all_streams(receipts: str) -> bool:
+    lower = receipts.lower()
+    return (
+        any(w in lower for w in _SQL_CITATION_WORDS)
+        and any(w in lower for w in _FAISS_CITATION_WORDS)
+        and any(w in lower for w in _GRAPH_CITATION_WORDS)
+    )
+
+
+def score_verdict_quality(prediction: dspy.Prediction) -> Dict[str, Any]:
+    """Deterministic quality checks for compare reports (no gold label)."""
+    raw_verdict = getattr(prediction, "verdict", "") or ""
+    data = _extract_json(raw_verdict)
+
+    json_parse_ok = data is not None
+    has_required_keys = bool(
+        data and {"safe_or_risk", "risk_score", "the_receipts"}.issubset(data.keys())
+    )
+    label_valid = bool(data and data.get("safe_or_risk") in ("SAFE", "RISK"))
+
+    score_in_range = False
+    if data is not None:
+        try:
+            score = float(data["risk_score"])
+            score_in_range = 0.0 <= score <= 10.0
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    receipts = str(data.get("the_receipts", "")) if data else ""
+    receipts_len = len(receipts.strip())
+    receipts_substantive = receipts_len > 30
+
+    lower_raw = raw_verdict.lower()
+    fluff_free = not any(fluff.lower() in lower_raw for fluff in AUDITOR_FLUFF)
+
+    cites_all_streams = _cites_all_streams(receipts) if receipts else False
+
+    structural_checks = [
+        json_parse_ok,
+        has_required_keys,
+        label_valid,
+        score_in_range,
+        receipts_substantive,
+        fluff_free,
+        cites_all_streams,
+    ]
+    structure_score = sum(structural_checks)
+
+    dummy_example = dspy.Example(safe_or_risk=None)
+    metric_passed = restaurant_risk_metric(dummy_example, prediction)
+
+    return {
+        "json_parse_ok":        json_parse_ok,
+        "has_required_keys":    has_required_keys,
+        "label_valid":          label_valid,
+        "score_in_range":       score_in_range,
+        "receipts_len":         receipts_len,
+        "receipts_substantive": receipts_substantive,
+        "fluff_free":           fluff_free,
+        "cites_all_streams":    cites_all_streams,
+        "metric_passed":        metric_passed,
+        "structure_score":      structure_score,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+#  STEP 8 — Compare compiled vs uncompiled baseline
+# ════════════════════════════════════════════════════════════════════
+
+def compare_compiled_vs_baseline(
+    restaurant_name: str,
+    gold_label: Optional[str] = HOLDOUT_GOLD_LABEL,
+) -> Dict[str, Any]:
+    """Run baseline and compiled programs on the same RAG contexts."""
+    if restaurant_name in TRAINING_NAMES:
+        raise ValueError(
+            f"'{restaurant_name}' is in TRAINING_MANIFEST — pick a held-out entity "
+            f"(default: {HOLDOUT_RESTAURANT})."
+        )
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY required for --compare")
+
+    student_lm = build_lm(STUDENT_MODEL)
+    dspy.configure(lm=student_lm)
+
+    print(f"\n[Compare] Firing RAG strike for '{restaurant_name}' (shared contexts)...")
+    contexts = parallel_rag_strike(restaurant_name)
+
+    print("[Compare] Running uncompiled baseline...")
+    baseline_pred = _run_program_on_contexts(RestaurantRiskAnalyzer(), contexts)
+
+    print("[Compare] Running compiled program...")
+    compiled_program = load_optimized_state(OPTIMIZED_STATE_PATH)
+    compiled_pred = _run_program_on_contexts(compiled_program, contexts)
+
+    baseline = _prediction_to_result(restaurant_name, contexts, baseline_pred, gold_label)
+    compiled = _prediction_to_result(restaurant_name, contexts, compiled_pred, gold_label)
+
+    b_score = baseline["quality"]["structure_score"]
+    c_score = compiled["quality"]["structure_score"]
+    b_metric = baseline["quality"]["metric_passed"]
+    c_metric = compiled["quality"]["metric_passed"]
+
+    return {
+        "restaurant": restaurant_name,
+        "gold_label": gold_label,
+        "baseline": baseline,
+        "compiled": compiled,
+        "delta": {
+            "structure_score": c_score - b_score,
+            "metric_passed": int(c_metric) - int(b_metric),
+        },
+        "compile_wins": c_score >= b_score and c_metric >= b_metric,
+    }
+
+
+def print_compare_report(result: Dict[str, Any]) -> bool:
+    """Print side-by-side compare table. Returns True if compile wins."""
+    baseline = result["baseline"]
+    compiled = result["compiled"]
+    bq = baseline["quality"]
+    cq = compiled["quality"]
+
+    print(f"\n{'═' * 72}")
+    print(f"  COMPILE COMPARE: {result['restaurant']}")
+    if result.get("gold_label"):
+        print(f"  Gold label (report only): {result['gold_label']}")
+    print(f"{'═' * 72}")
+
+    rows = [
+        ("json_parse_ok",        bq["json_parse_ok"],        cq["json_parse_ok"]),
+        ("has_required_keys",    bq["has_required_keys"],    cq["has_required_keys"]),
+        ("label_valid",          bq["label_valid"],          cq["label_valid"]),
+        ("score_in_range",       bq["score_in_range"],       cq["score_in_range"]),
+        ("receipts_substantive", bq["receipts_substantive"], cq["receipts_substantive"]),
+        ("fluff_free",           bq["fluff_free"],           cq["fluff_free"]),
+        ("cites_all_streams",    bq["cites_all_streams"],    cq["cites_all_streams"]),
+        ("structure_score",      bq["structure_score"],      cq["structure_score"]),
+        ("metric_passed",        bq["metric_passed"],        cq["metric_passed"]),
+    ]
+
+    print(f"\n  {'Check':<22} {'Baseline':>12} {'Compiled':>12}")
+    print(f"  {'-' * 48}")
+    for name, b_val, c_val in rows:
+        if isinstance(b_val, bool):
+            b_str = "PASS" if b_val else "FAIL"
+            c_str = "PASS" if c_val else "FAIL"
+        else:
+            b_str = str(b_val)
+            c_str = str(c_val)
+        print(f"  {name:<22} {b_str:>12} {c_str:>12}")
+
+    print(f"\n  {'Field':<22} {'Baseline':>12} {'Compiled':>12}")
+    print(f"  {'-' * 48}")
+    print(f"  {'safe_or_risk':<22} {str(baseline['safe_or_risk']):>12} {str(compiled['safe_or_risk']):>12}")
+    print(f"  {'risk_score':<22} {str(baseline['risk_score']):>12} {str(compiled['risk_score']):>12}")
+
+    print(f"\n  BASELINE RECEIPTS (truncated):")
+    print(f"  {str(baseline['the_receipts'])[:400]}...")
+    print(f"\n  COMPILED RECEIPTS (truncated):")
+    print(f"  {str(compiled['the_receipts'])[:400]}...")
+
+    b_metric = "PASS" if bq["metric_passed"] else "FAIL"
+    c_metric = "PASS" if cq["metric_passed"] else "FAIL"
+    summary = (
+        f"COMPILE WINS: structure {bq['structure_score']}/7 → {cq['structure_score']}/7, "
+        f"metric {b_metric} → {c_metric}"
+    )
+    if result["compile_wins"]:
+        print(f"\n  {summary}")
+    else:
+        print(f"\n  COMPILE DID NOT WIN: structure {bq['structure_score']}/7 vs "
+              f"{cq['structure_score']}/7, metric {b_metric} vs {c_metric}")
+
+    return result["compile_wins"]
+
+
+# ════════════════════════════════════════════════════════════════════
 #  Public API — single-restaurant analysis
 # ════════════════════════════════════════════════════════════════════
 
@@ -426,27 +655,12 @@ def analyze_restaurant(
     contexts = parallel_rag_strike(restaurant_name)
 
     print("[Analyze] Running ChainOfThought synthesizer...")
-    prediction = program(
-        sql_context=contexts["sql_context"],
-        faiss_context=contexts["faiss_context"],
-        graph_context=contexts["graph_context"],
-    )
+    prediction = _run_program_on_contexts(program, contexts)
 
-    raw_verdict = prediction.verdict or ""
-    data = _extract_json(raw_verdict) or {}
-
-    dummy_example = dspy.Example(safe_or_risk=None)
-    passed_metric = restaurant_risk_metric(dummy_example, prediction)
-
-    return {
-        "restaurant":      restaurant_name,
-        "safe_or_risk":    data.get("safe_or_risk", "PARSE_ERROR"),
-        "risk_score":      data.get("risk_score", -1.0),
-        "the_receipts":    data.get("the_receipts", raw_verdict),
-        "metric_passed":   passed_metric,
-        "raw_reasoning":   getattr(prediction, "reasoning", ""),
-        "contexts":        contexts,
-    }
+    result = _prediction_to_result(restaurant_name, contexts, prediction)
+    del result["raw_verdict"]
+    del result["quality"]
+    return result
 
 
 def print_verdict(result: Dict[str, Any]) -> None:
@@ -559,9 +773,23 @@ def main() -> None:
         default=4,
         help="Max labeled demos for BootstrapFewShot (default: 4)",
     )
+    parser.add_argument(
+        "--compare",
+        metavar="RESTAURANT_NAME",
+        nargs="?",
+        const=HOLDOUT_RESTAURANT,
+        default=None,
+        help=f"Compare uncompiled vs compiled on held-out entity (default: {HOLDOUT_RESTAURANT})",
+    )
     args = parser.parse_args()
 
-    if not any([args.test_judge, args.smoke is not None, args.optimize, args.analyze]):
+    if not any([
+        args.test_judge,
+        args.smoke is not None,
+        args.optimize,
+        args.analyze,
+        args.compare is not None,
+    ]):
         parser.print_help()
         print(
             "\nExamples:\n"
@@ -569,6 +797,7 @@ def main() -> None:
             '  python compiler.py --smoke "Moldy Mike\'s Wing Factory"\n'
             "  python compiler.py --optimize\n"
             '  python compiler.py --analyze "Moldy Mike\'s Wing Factory"\n'
+            "  python compiler.py --compare\n"
         )
         sys.exit(0)
 
@@ -607,6 +836,21 @@ def main() -> None:
             sys.exit(1)
         result = analyze_restaurant(args.analyze)
         print_verdict(result)
+
+    if args.compare is not None:
+        if not OPENROUTER_API_KEY:
+            print("\n[ERROR] OPENROUTER_API_KEY required for --compare")
+            sys.exit(1)
+        if not OPTIMIZED_STATE_PATH.exists():
+            print(f"\n[ERROR] No optimized state at '{OPTIMIZED_STATE_PATH}'. Run --optimize first.")
+            sys.exit(1)
+        try:
+            compare_result = compare_compiled_vs_baseline(args.compare)
+        except ValueError as exc:
+            print(f"\n[ERROR] {exc}")
+            sys.exit(1)
+        if not print_compare_report(compare_result):
+            sys.exit(1)
 
 
 if __name__ == "__main__":

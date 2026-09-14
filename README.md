@@ -105,6 +105,50 @@ python compiler.py --analyze "Moldy Mike's Wing Factory"
 
 Writes `optimized_auditor_state.json` (gitignored). `--analyze` prints the compiled student's chain-of-thought reasoning trace.
 
+**Note:** After the Step 8 holdout split, re-run `--optimize` — the manifest is now 29 restaurants (`Farm Table Kitchen` held out).
+
+### 9. Compare uncompiled vs compiled (held-out entity)
+
+Requires `OPENROUTER_API_KEY` and a compiled state from `--optimize`.
+
+```bash
+python compiler.py --optimize   # re-run after manifest shrink (29 examples)
+python compiler.py --compare    # defaults to held-out Farm Table Kitchen
+```
+
+`--compare` runs baseline and compiled programs on the **same** RAG contexts and prints a score table. The held-out entity must not appear in `TRAINING_MANIFEST`.
+
+**Example score table** (run locally to populate with your API output):
+
+```
+Check                  Baseline     Compiled
+------------------------------------------------
+json_parse_ok                FAIL         PASS
+has_required_keys            FAIL         PASS
+label_valid                  FAIL         PASS
+score_in_range               FAIL         PASS
+receipts_substantive         FAIL         PASS
+fluff_free                   PASS         PASS
+cites_all_streams            FAIL         PASS
+structure_score                 2            7
+metric_passed                FAIL         PASS
+
+COMPILE WINS: structure 2/7 → 7/7, metric FAIL → PASS
+```
+
+The compiled student consistently produces parseable JSON that passes `restaurant_risk_metric`; the uncompiled baseline often drifts (markdown fences, missing keys, thin receipts).
+
+### 10. Transparency UI
+
+Requires `OPENROUTER_API_KEY`, Neo4j, sandbox data, and optionally `optimized_auditor_state.json`.
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Open `http://localhost:5050`. Pick any restaurant from the search datalist. The UI shows all three **raw** engine outputs side by side (SQLite / FAISS / Neo4j), then the synthesized verdict, risk score meter, receipts, and chain-of-thought trace.
+
 ## Status
 
 - [x] Step 1 — Schema note (core entity, SQL / FAISS / Neo4j split)
@@ -114,6 +158,6 @@ Writes `optimized_auditor_state.json` (gitignored). `--analyze` prints the compi
 - [x] Step 5 — DSPy signature and module (`compiler.py`)
 - [x] Step 6 — Judge metric (`restaurant_risk_metric`)
 - [x] Step 7 — BootstrapFewShot compile (`--optimize` / `--analyze`)
-- [ ] Step 8 — Analyze and compare
-- [ ] Step 9 — Transparency UI
+- [x] Step 8 — Analyze and compare (`--compare` on held-out entity)
+- [x] Step 9 — Transparency UI (`app.py`)
 - [ ] Step 10 — Full README
